@@ -1,4 +1,5 @@
 const prisma = require('../config/prisma');
+const couponService = require('./couponService');
 
 const GRACE_PERIOD_DAYS = parseInt(process.env.GRACE_PERIOD_DAYS) || 7;
 
@@ -42,30 +43,12 @@ const validateCouponForPlan = async (couponCode, planId, userId = null) => {
     return null;
   }
 
-  const couponService = require('./couponService');
-
   try {
     const coupon = await couponService.validateCoupon(couponCode, planId, userId);
     return coupon;
   } catch (error) {
     throw error;
   }
-};
-
-const applyCouponDiscount = (price, coupon) => {
-  if (!coupon) return price;
-
-  const priceNum = parseFloat(price);
-
-  if (coupon.type === 'percentage') {
-    const discount = priceNum * (parseFloat(coupon.value) / 100);
-    return (priceNum - discount).toFixed(2);
-  } else if (coupon.type === 'fixed') {
-    const result = priceNum - parseFloat(coupon.value);
-    return Math.max(0, result).toFixed(2);
-  }
-
-  return price;
 };
 
 const createSubscription = async (userId, planId, billingCycle, couponCode = null) => {
@@ -105,8 +88,9 @@ const createSubscription = async (userId, planId, billingCycle, couponCode = nul
   const coupon = await validateCouponForPlan(couponCode, planId, userId);
 
   const basePrice = calculatePrice(plan, billingCycle);
-  const currentPrice = applyCouponDiscount(basePrice, coupon);
-  const discountAmount = parseFloat(basePrice) - parseFloat(currentPrice);
+  const pricing = couponService.calculatePricing(coupon, basePrice);
+  const currentPrice = pricing.finalAmount;
+  const discountAmount = pricing.discountAmount;
 
   const now = new Date();
   const currentPeriodEnd = calculatePeriodEnd(now, billingCycle);
@@ -134,19 +118,33 @@ const createSubscription = async (userId, planId, billingCycle, couponCode = nul
     });
 
     if (coupon) {
+      const existingUsage = await tx.couponUsage.findFirst({
+        where: { couponId: coupon.id, userId },
+      });
+      if (existingUsage) {
+        throw new Error('您已使用过此优惠码，不可重复使用');
+      }
+
       await tx.coupon.update({
         where: { id: coupon.id },
         data: { usedCount: { increment: 1 } },
       });
 
-      await tx.couponUsage.create({
-        data: {
-          couponId: coupon.id,
-          userId,
-          subscriptionId: subscription.id,
-          discountAmount,
-        },
-      });
+      try {
+        await tx.couponUsage.create({
+          data: {
+            couponId: coupon.id,
+            userId,
+            subscriptionId: subscription.id,
+            discountAmount,
+          },
+        });
+      } catch (err) {
+        if (err.code === 'P2002') {
+          throw new Error('您已使用过此优惠码，不可重复使用');
+        }
+        throw err;
+      }
     }
 
     return subscription;
@@ -258,7 +256,8 @@ const renewSubscription = async (subscriptionId) => {
   let currentPrice = parseFloat(subscription.currentPrice);
   if (subscription.coupon) {
     const basePrice = calculatePrice(subscription.plan, subscription.billingCycle);
-    currentPrice = parseFloat(applyCouponDiscount(basePrice, subscription.coupon));
+    const pricing = couponService.calculatePricing(subscription.coupon, basePrice);
+    currentPrice = pricing.finalAmount;
   }
 
   const updated = await prisma.subscription.update({

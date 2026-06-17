@@ -246,6 +246,27 @@ const calculateDiscount = (coupon, originalAmount) => {
   return 0;
 };
 
+const calculatePricing = (coupon, originalAmount) => {
+  const amount = parseFloat(originalAmount);
+  if (!coupon) {
+    return {
+      originalAmount: amount,
+      discountAmount: 0,
+      finalAmount: amount,
+    };
+  }
+  let discountAmount = 0;
+  if (coupon.type === COUPON_TYPES.PERCENTAGE) {
+    discountAmount = amount * (parseFloat(coupon.value) / 100);
+    discountAmount = Math.min(discountAmount, amount);
+  } else if (coupon.type === COUPON_TYPES.FIXED) {
+    discountAmount = Math.min(parseFloat(coupon.value), amount);
+  }
+  discountAmount = parseFloat(discountAmount.toFixed(2));
+  const finalAmount = parseFloat((amount - discountAmount).toFixed(2));
+  return { originalAmount: amount, discountAmount, finalAmount };
+};
+
 /**
  * 应用优惠码（使用优惠码）
  * 1. 创建CouponUsage使用记录
@@ -495,6 +516,7 @@ module.exports = {
   updateCoupon,
   deleteCoupon,
   calculateDiscount,
+  calculatePricing,
   COUPON_TYPES,
   APPLIES_TO,
 };

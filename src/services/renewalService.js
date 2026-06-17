@@ -152,13 +152,24 @@ const processAutoRenewal = async () => {
           });
           results.invoicesPaid++;
 
-          await emailService.sendInvoicePaid(user, invoice);
-          results.emailsSent++;
-          console.log(`[AutoRenew] 已向 ${user.email} 发送支付成功通知`);
+          try {
+            const paidInvoice = await invoiceService.getInvoiceById(invoice.id);
+            const pdfPath = await invoiceService.generateInvoicePdf(invoice.id);
+            console.log(`[AutoRenew] 已重新生成已支付状态的PDF: ${pdfPath}`);
+          } catch (pdfErr) {
+            console.error(`[AutoRenew] 重新生成PDF失败:`, pdfErr.message);
+          }
+
+          const emailResult = await emailService.sendInvoicePaid(user, invoice);
+          if (emailResult && emailResult.success && !emailResult.skipped) {
+            results.emailsSent++;
+            console.log(`[AutoRenew] 已向 ${user.email} 发送支付成功通知`);
+          }
 
           results.renewed++;
         } else {
           console.warn(`[AutoRenew] 订阅 ${subscriptionId} 支付失败: ${paymentResult.failureReason}`);
+          console.log(`[AutoRenew] 订阅 ${subscriptionId} 支付失败，账单 ${invoice.invoiceNumber} 保持 pending 状态，不发送支付成功通知`);
 
           const now = new Date();
           const gracePeriodEnd = new Date(subscription.currentPeriodEnd);
@@ -175,11 +186,13 @@ const processAutoRenewal = async () => {
             console.log(`[AutoRenew] 订阅 ${subscriptionId} 已进入宽限期，截止: ${gracePeriodEnd.toISOString().split('T')[0]}`);
 
             try {
-              await emailService.sendGracePeriodStart(user, {
+              const graceEmailResult = await emailService.sendGracePeriodStart(user, {
                 ...subscription,
                 gracePeriodEndsAt: gracePeriodEnd,
               });
-              console.log(`[AutoRenew] 已向 ${user.email} 发送宽限期通知`);
+              if (graceEmailResult && graceEmailResult.success && !graceEmailResult.skipped) {
+                console.log(`[AutoRenew] 已向 ${user.email} 发送宽限期通知`);
+              }
             } catch (emailErr) {
               console.error(`[AutoRenew] 发送宽限期通知失败:`, emailErr.message);
             }
@@ -263,10 +276,12 @@ const processExpiredSubscriptions = async () => {
           data: { status: SUBSCRIPTION_STATUSES.PAST_DUE },
         });
 
-        await emailService.sendGracePeriodStart(sub.user, sub);
+        const graceResult = await emailService.sendGracePeriodStart(sub.user, sub);
 
         results.pastDue++;
-        results.graceNotificationsSent++;
+        if (graceResult && graceResult.success && !graceResult.skipped) {
+          results.graceNotificationsSent++;
+        }
         console.log(`订阅 ${sub.id} 已进入宽限期，已发送通知`);
       } catch (error) {
         console.error(`处理订阅 ${sub.id} 宽限期时出错:`, error.message);
@@ -302,10 +317,12 @@ const processExpiredSubscriptions = async () => {
           data: { status: SUBSCRIPTION_STATUSES.PAUSED },
         });
 
-        await emailService.sendSubscriptionPaused(sub.user, sub);
+        const pauseResult = await emailService.sendSubscriptionPaused(sub.user, sub);
 
         results.paused++;
-        results.pauseNotificationsSent++;
+        if (pauseResult && pauseResult.success && !pauseResult.skipped) {
+          results.pauseNotificationsSent++;
+        }
         console.log(`订阅 ${sub.id} 宽限期已过，已暂停订阅并发送通知`);
       } catch (error) {
         console.error(`暂停订阅 ${sub.id} 时出错:`, error.message);

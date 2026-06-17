@@ -241,6 +241,7 @@ model CouponUsage {
   subscription Subscription? @relation(fields: [subscriptionId], references: [id])
   invoice      Invoice?      @relation(fields: [invoiceId], references: [id])
 
+  @@unique([couponId, userId])
   @@map("coupon_usages")
 }
 

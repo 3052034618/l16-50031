@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 
-const { authenticate } = require('../middleware/authMiddleware');
+const { requireFree } = require('../middleware/featureAccess');
 const {
   invoiceIdSchema,
   getInvoicesSchema,
@@ -14,12 +14,10 @@ const {
   downloadInvoicePdf,
 } = require('../controllers/invoiceController');
 
-router.use(authenticate);
+router.get('/', requireFree, validateQuery(getInvoicesSchema), getUserInvoices);
 
-router.get('/', validateQuery(getInvoicesSchema), getUserInvoices);
+router.get('/:id', requireFree, validateParams(invoiceIdSchema), getInvoiceById);
 
-router.get('/:id', validateParams(invoiceIdSchema), getInvoiceById);
-
-router.get('/:id/pdf', validateParams(invoiceIdSchema), downloadInvoicePdf);
+router.get('/:id/pdf', requireFree, validateParams(invoiceIdSchema), downloadInvoicePdf);
 
 module.exports = router;
