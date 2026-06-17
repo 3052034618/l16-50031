@@ -329,8 +329,18 @@ const approveRefund = async (refundId, adminId, adminNote = '') => {
 
   try {
     const emailService = require('./emailService');
+    const { parseEmailResult } = require('./emailService');
     if (finalRefund && finalRefund.user && finalRefund.user.email) {
-      await emailService.sendRefundProcessed(finalRefund.user, finalRefund);
+      const emailResult = await emailService.sendRefundProcessed(finalRefund.user, finalRefund);
+      const parsed = parseEmailResult(emailResult, finalRefund.user.email, 'refund_processed');
+      
+      if (parsed.skipped) {
+        console.log(`[Refund] 已跳过退款通知 ${finalRefund.user.email}（${parsed.reason}）`);
+      } else if (parsed.failed) {
+        console.error(`[Refund] 向 ${finalRefund.user.email} 发送退款通知失败: ${parsed.error}`);
+      } else if (parsed.success) {
+        console.log(`[Refund] 已向 ${finalRefund.user.email} 发送退款处理完成通知`);
+      }
     }
   } catch (emailError) {
     console.error(`[Refund] 退款通知邮件发送失败 ${refundId}:`, emailError.message);

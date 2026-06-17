@@ -33,7 +33,14 @@ const setupRenewalReminders = () => {
       for (const days of reminderDays) {
         try {
           const result = await renewalService.sendRenewalReminders(days);
-          console.log(`[Cron] ${days}天续费提醒完成: 成功 ${result.sent} 条, 失败 ${result.failed} 条`);
+          console.log(`[Cron] ${days}天续费提醒完成: 成功 ${result.sent} 条, 跳过 ${result.skipped} 条, 失败 ${result.failed} 条, 总计 ${result.total} 条`);
+          
+          if (result.failed > 0) {
+            console.warn(`[Cron] ⚠️  ${days}天续费提醒有 ${result.failed} 条失败:`);
+            result.failedEmails.forEach(f => {
+              console.warn(`  - ${f.userEmail} (${f.subscriptionId}): ${f.error}`);
+            });
+          }
         } catch (error) {
           console.error(`[Cron] ${days}天续费提醒执行失败:`, error.message);
         }
@@ -61,6 +68,21 @@ const setupAutoRenewal = () => {
     try {
       const result = await renewalService.processAutoRenewal();
       console.log(`[Cron] 自动续费完成: 成功 ${result.renewed} 个, 失败 ${result.failed} 个, 生成账单 ${result.invoicesCreated} 张`);
+      console.log(`[Cron] 邮件统计 - 支付成功通知: 成功 ${result.invoicePaidEmailsSent}, 跳过 ${result.invoicePaidEmailsSkipped}, 失败 ${result.invoicePaidEmailsFailed}`);
+      console.log(`[Cron] 邮件统计 - 宽限期通知: 成功 ${result.gracePeriodEmailsSent}, 跳过 ${result.gracePeriodEmailsSkipped}, 失败 ${result.gracePeriodEmailsFailed}`);
+      
+      if (result.invoicePaidEmailsFailed > 0) {
+        console.warn(`[Cron] ⚠️  ${result.invoicePaidEmailsFailed} 封支付成功通知发送失败:`);
+        result.invoicePaidEmailFailures.forEach(f => {
+          console.warn(`  - ${f.userEmail} (订阅${f.subscriptionId}, 账单${f.invoiceId}): ${f.error}`);
+        });
+      }
+      if (result.gracePeriodEmailsFailed > 0) {
+        console.warn(`[Cron] ⚠️  ${result.gracePeriodEmailsFailed} 封宽限期通知发送失败:`);
+        result.gracePeriodEmailFailures.forEach(f => {
+          console.warn(`  - ${f.userEmail} (订阅${f.subscriptionId}): ${f.error}`);
+        });
+      }
     } catch (error) {
       console.error('[Cron] 自动续费任务执行出错:', error.message);
     }
@@ -83,7 +105,21 @@ const setupGracePeriodCheck = () => {
     try {
       const result = await renewalService.processExpiredSubscriptions();
       console.log(`[Cron] 宽限期检查完成: 进入宽限期 ${result.pastDue} 个, 暂停 ${result.paused} 个, 取消 ${result.cancelled} 个, 过期 ${result.expired} 个`);
-      console.log(`[Cron] 通知发送: 宽限期通知 ${result.graceNotificationsSent} 封, 暂停通知 ${result.pauseNotificationsSent} 封`);
+      console.log(`[Cron] 通知发送 - 宽限期通知: 成功 ${result.graceNotificationsSent}, 跳过 ${result.graceNotificationsSkipped}, 失败 ${result.graceNotificationsFailed}`);
+      console.log(`[Cron] 通知发送 - 暂停通知: 成功 ${result.pauseNotificationsSent}, 跳过 ${result.pauseNotificationsSkipped}, 失败 ${result.pauseNotificationsFailed}`);
+      
+      if (result.graceNotificationsFailed > 0) {
+        console.warn(`[Cron] ⚠️  ${result.graceNotificationsFailed} 封宽限期通知发送失败:`);
+        result.graceFailedEmails.forEach(f => {
+          console.warn(`  - ${f.userEmail} (订阅${f.subscriptionId}): ${f.error}`);
+        });
+      }
+      if (result.pauseNotificationsFailed > 0) {
+        console.warn(`[Cron] ⚠️  ${result.pauseNotificationsFailed} 封暂停通知发送失败:`);
+        result.pauseFailedEmails.forEach(f => {
+          console.warn(`  - ${f.userEmail} (订阅${f.subscriptionId}): ${f.error}`);
+        });
+      }
     } catch (error) {
       console.error('[Cron] 宽限期检查任务执行出错:', error.message);
     }

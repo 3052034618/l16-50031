@@ -69,6 +69,41 @@ const getDayRange = () => {
   return { startOfDay, endOfDay };
 };
 
+const parseEmailResult = (result, userEmail, notificationType) => {
+  const record = {
+    userEmail,
+    notificationType,
+    success: false,
+    skipped: false,
+    failed: false,
+    reason: null,
+    error: null,
+  };
+
+  if (!result) {
+    record.failed = true;
+    record.reason = '邮件返回值为空';
+    return record;
+  }
+
+  if (result.skipped) {
+    record.skipped = true;
+    record.success = true;
+    record.reason = result.reason || 'already_sent_today';
+    return record;
+  }
+
+  if (result.success) {
+    record.success = true;
+    return record;
+  }
+
+  record.failed = true;
+  record.error = result.error || '未知错误';
+  record.reason = 'send_failed';
+  return record;
+};
+
 /**
  * 检查当天是否已发送过该类型通知
  * @param {string} userId - 用户ID
@@ -483,4 +518,5 @@ module.exports = {
   hasSentNotification,
   EMAIL_TYPES,
   logEmailNotification,
+  parseEmailResult,
 };
