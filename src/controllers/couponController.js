@@ -3,8 +3,14 @@ const couponService = require('../services/couponService');
 
 const validateCoupon = async (req, res, next) => {
   try {
-    const { code, planId } = req.query;
+    const { code, planId, billingCycle = 'monthly' } = req.query;
     const userId = req.user ? req.user.id : null;
+
+    if (!userId) {
+      const error = new Error('请先登录后再验证优惠码');
+      error.status = 401;
+      throw error;
+    }
 
     const coupon = await couponService.validateCoupon(code, planId, userId);
 
@@ -14,10 +20,26 @@ const validateCoupon = async (req, res, next) => {
 
     let originalAmount = 0;
     if (plan) {
-      originalAmount = parseFloat(plan.priceMonthly);
+      originalAmount = billingCycle === 'yearly'
+        ? parseFloat(plan.priceYearly)
+        : parseFloat(plan.priceMonthly);
     }
 
     const discountAmount = couponService.calculateDiscount(coupon, originalAmount);
+    const finalAmount = Math.max(0, originalAmount - discountAmount);
+
+    const usageCheck = await prisma.couponUsage.findFirst({
+      where: {
+        couponId: coupon.id,
+        userId,
+      },
+    });
+
+    if (usageCheck) {
+      const error = new Error('您已使用过此优惠码，不可重复使用');
+      error.status = 400;
+      throw error;
+    }
 
     res.json({
       data: {
@@ -28,10 +50,13 @@ const validateCoupon = async (req, res, next) => {
           value: coupon.value,
           currency: coupon.currency,
           appliesTo: coupon.appliesTo,
+          description: coupon.description,
         },
         discountAmount,
         originalAmount,
-        finalAmount: Math.max(0, originalAmount - discountAmount),
+        finalAmount,
+        billingCycle,
+        canApply: true,
       },
     });
   } catch (error) {

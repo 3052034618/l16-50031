@@ -126,7 +126,14 @@ const upgradeSubscription = async (subscriptionId, newPlanId, userId) => {
       },
     });
 
-    const invoiceNumber = generateInvoiceNumber();
+    const invoiceNumber = await tx.invoice.count({
+      where: { invoiceNumber: { startsWith: `INV-${new Date().getFullYear()}${String(new Date().getMonth() + 1).padStart(2, '0')}${String(new Date().getDate()).padStart(2, '0')}` } },
+    }).then(count => {
+      const date = new Date();
+      const prefix = `INV-${date.getFullYear()}${String(date.getMonth() + 1).padStart(2, '0')}${String(date.getDate()).padStart(2, '0')}`;
+      return `${prefix}-${String(count + 1).padStart(4, '0')}`;
+    });
+
     const invoice = await tx.invoice.create({
       data: {
         userId: subscription.userId,
@@ -152,6 +159,13 @@ const upgradeSubscription = async (subscriptionId, newPlanId, userId) => {
       },
       include: {
         items: true,
+        user: {
+          select: {
+            id: true,
+            email: true,
+            name: true,
+          },
+        },
       },
     });
 
@@ -168,6 +182,26 @@ const upgradeSubscription = async (subscriptionId, newPlanId, userId) => {
       remainingDays,
     };
   });
+
+  if (result.invoice) {
+    try {
+      const pdfService = require('./pdfService');
+      const fs = require('fs');
+      const path = require('path');
+      const invoicesDir = path.join(process.cwd(), 'invoices');
+      if (!fs.existsSync(invoicesDir)) {
+        fs.mkdirSync(invoicesDir, { recursive: true });
+      }
+      const pdfPath = await pdfService.generateInvoicePdf(result.invoice, result.invoice.items, result.invoice.user);
+      await prisma.invoice.update({
+        where: { id: result.invoice.id },
+        data: { pdfUrl: pdfPath },
+      });
+      result.invoice.pdfUrl = pdfPath;
+    } catch (pdfError) {
+      console.error(`[UpgradeDowngrade] 升级账单PDF生成失败:`, pdfError.message);
+    }
+  }
 
   return result;
 };

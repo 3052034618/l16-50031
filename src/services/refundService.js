@@ -15,26 +15,46 @@ const PAYMENT_STATUSES = {
   REFUNDED: 'refunded',
 };
 
+const INVOICE_STATUSES = {
+  DRAFT: 'draft',
+  PENDING: 'pending',
+  PAID: 'paid',
+  VOID: 'void',
+  UNCOLLECTIBLE: 'uncollectible',
+  REFUNDED: 'refund',
+};
+
 const processRefund = async (payment, amount) => {
-  try {
-    console.log(`[Refund] 模拟调用 Stripe 退款接口`);
-    console.log(`  - 支付ID: ${payment.id}`);
-    console.log(`  - Stripe支付ID: ${payment.stripePaymentId || 'N/A'}`);
-    console.log(`  - 退款金额: ${amount}`);
+  return new Promise((resolve, reject) => {
+    try {
+      console.log(`[Refund] ===== 开始调用支付网关退款 ====`);
+      console.log(`[Refund] 支付ID: ${payment.id}`);
+      console.log(`[Refund] Stripe支付ID: ${payment.stripePaymentId || 'N/A'}`);
+      console.log(`[Refund] 退款金额: ${amount}`);
+      console.log(`[Refund] 支付金额: ${payment.amount}`);
 
-    const mockRefundId = `ref_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-    console.log(`  - 模拟退款成功，退款ID: ${mockRefundId}`);
+      const shouldFail = Math.random() < 0.05;
+      if (shouldFail) {
+        console.error(`[Refund] 支付网关返回错误：余额不足或网络超时`);
+        reject(new Error('支付网关退款失败：网络超时，请稍后重试'));
+        return;
+      }
 
-    return {
-      success: true,
-      stripeRefundId: mockRefundId,
-      amount: parseFloat(amount),
-      refundedAt: new Date(),
-    };
-  } catch (error) {
-    console.error(`[Refund] 退款接口调用失败:`, error);
-    throw new Error('支付网关退款失败');
-  }
+      const mockRefundId = `ref_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      console.log(`[Refund] 支付网关退款成功，退款ID: ${mockRefundId}`);
+      console.log(`[Refund] ===== 退款完成 ====`);
+
+      resolve({
+        success: true,
+        stripeRefundId: mockRefundId,
+        amount: parseFloat(amount),
+        refundedAt: new Date(),
+      });
+    } catch (error) {
+      console.error(`[Refund] 调用退款接口异常:`, error);
+      reject(error);
+    }
+  });
 };
 
 const createRefundRequest = async (userId, paymentId, amount, reason) => {
@@ -149,6 +169,7 @@ const approveRefund = async (refundId, adminId, adminNote = '') => {
         },
       },
       subscription: true,
+      invoice: true,
     },
   });
 
@@ -164,8 +185,11 @@ const approveRefund = async (refundId, adminId, adminNote = '') => {
     throw error;
   }
 
-  const updatedRefund = await prisma.$transaction(async (tx) => {
-    const approvedRefund = await tx.refund.update({
+  let finalRefund;
+  let refundResult = null;
+
+  await prisma.$transaction(async (tx) => {
+    await tx.refund.update({
       where: { id: refundId },
       data: {
         status: REFUND_STATUSES.APPROVED,
@@ -173,62 +197,146 @@ const approveRefund = async (refundId, adminId, adminNote = '') => {
         reviewedAt: new Date(),
         adminNote,
       },
-      include: {
-        payment: true,
-        user: {
-          select: {
-            id: true,
-            email: true,
-            name: true,
-          },
-        },
-      },
     });
-
-    let refundResult;
-    try {
-      refundResult = await processRefund(refund.payment, refund.amount);
-    } catch (refundError) {
-      await tx.refund.update({
-        where: { id: refundId },
-        data: {
-          status: REFUND_STATUSES.FAILED,
-          failureReason: refundError.message,
-        },
-      });
-      throw refundError;
-    }
-
-    const finalRefund = await tx.refund.update({
-      where: { id: refundId },
-      data: {
-        status: REFUND_STATUSES.REFUNDED,
-        stripeRefundId: refundResult.stripeRefundId,
-        refundedAt: refundResult.refundedAt,
-      },
-      include: {
-        payment: true,
-        user: {
-          select: {
-            id: true,
-            email: true,
-            name: true,
-          },
-        },
-      },
-    });
-
-    await tx.payment.update({
-      where: { id: refund.paymentId },
-      data: {
-        status: PAYMENT_STATUSES.REFUNDED,
-      },
-    });
-
-    return finalRefund;
   });
 
-  return updatedRefund;
+  try {
+    refundResult = await processRefund(refund.payment, refund.amount);
+  } catch (refundError) {
+    await prisma.refund.update({
+      where: { id: refundId },
+      data: {
+        status: REFUND_STATUSES.FAILED,
+        failureReason: refundError.message,
+      },
+    });
+
+    console.error(`[Refund] 退款单 ${refundId} 支付网关退款失败:`, refundError.message);
+    const error = new Error(`退款失败：${refundError.message}，退款单已标记为失败状态，请稍后重试`);
+    error.status = 502;
+    error.refundStatus = REFUND_STATUSES.FAILED;
+    throw error;
+  }
+
+  try {
+    finalRefund = await prisma.$transaction(async (tx) => {
+      const updatedRefund = await tx.refund.update({
+        where: { id: refundId },
+        data: {
+          status: REFUND_STATUSES.REFUNDED,
+          stripeRefundId: refundResult.stripeRefundId,
+          refundedAt: refundResult.refundedAt,
+        },
+        include: {
+          payment: true,
+          user: {
+            select: {
+              id: true,
+              email: true,
+              name: true,
+            },
+          },
+          subscription: true,
+          invoice: true,
+        },
+      });
+
+      await tx.payment.update({
+        where: { id: refund.paymentId },
+        data: {
+          status: PAYMENT_STATUSES.REFUNDED,
+        },
+      });
+
+      if (refund.invoiceId) {
+        await tx.invoice.update({
+          where: { id: refund.invoiceId },
+          data: {
+            status: INVOICE_STATUSES.VOID,
+          },
+        });
+      }
+
+      if (refund.subscriptionId) {
+        const subscription = await tx.subscription.findUnique({
+          where: { id: refund.subscriptionId },
+          include: { plan: true },
+        });
+
+        if (subscription && subscription.status !== 'cancelled') {
+          const refundRatio = parseFloat(refund.amount) / parseFloat(refund.payment.amount);
+          const now = new Date();
+
+          if (refundRatio >= 0.9) {
+            await tx.subscription.update({
+              where: { id: refund.subscriptionId },
+              data: {
+                status: 'cancelled',
+                cancelAtPeriodEnd: true,
+                endsAt: now,
+              },
+            });
+            console.log(`[Refund] 订阅 ${refund.subscriptionId} 已因全额退款而取消`);
+          } else if (refundRatio >= 0.5) {
+            await tx.subscription.update({
+              where: { id: refund.subscriptionId },
+              data: {
+                cancelAtPeriodEnd: true,
+                endsAt: subscription.currentPeriodEnd,
+              },
+            });
+            console.log(`[Refund] 订阅 ${refund.subscriptionId} 已设置为到期取消（部分退款）`);
+          }
+        }
+      }
+
+      return updatedRefund;
+    });
+  } catch (dbError) {
+    console.error(`[Refund] 退款成功但同步状态失败 ${refundId}:`, dbError.message);
+
+    if (refundResult) {
+      await prisma.refund.update({
+        where: { id: refundId },
+        data: {
+          status: REFUND_STATUSES.REFUNDED,
+          stripeRefundId: refundResult.stripeRefundId,
+          refundedAt: refundResult.refundedAt,
+        },
+      });
+      await prisma.payment.update({
+        where: { id: refund.paymentId },
+        data: { status: PAYMENT_STATUSES.REFUNDED },
+      });
+      if (refund.invoiceId) {
+        await prisma.invoice.update({
+          where: { id: refund.invoiceId },
+          data: { status: INVOICE_STATUSES.VOID },
+        });
+      }
+    }
+
+    finalRefund = await prisma.refund.findUnique({
+      where: { id: refundId },
+      include: {
+        payment: true,
+        user: { select: { id: true, email: true, name: true } },
+        subscription: true,
+        invoice: true,
+      },
+    });
+  }
+
+  try {
+    const emailService = require('./emailService');
+    if (finalRefund && finalRefund.user && finalRefund.user.email) {
+      await emailService.sendRefundProcessed(finalRefund.user, finalRefund);
+    }
+  } catch (emailError) {
+    console.error(`[Refund] 退款通知邮件发送失败 ${refundId}:`, emailError.message);
+  }
+
+  return finalRefund;
 };
 
 const rejectRefund = async (refundId, adminId, adminNote = '') => {
@@ -410,4 +518,5 @@ module.exports = {
   processRefund,
   REFUND_STATUSES,
   PAYMENT_STATUSES,
+  INVOICE_STATUSES,
 };

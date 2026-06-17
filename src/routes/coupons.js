@@ -21,7 +21,7 @@ const {
   deleteCoupon,
 } = require('../controllers/couponController');
 
-router.get('/validate', validateQuery(validateCouponSchema), validateCoupon);
+router.get('/validate', authenticate, validateQuery(validateCouponSchema), validateCoupon);
 
 router.get('/', authenticate, requireAdmin, validateQuery(listCouponsSchema), getCoupons);
 

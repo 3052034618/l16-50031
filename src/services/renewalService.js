@@ -2,6 +2,7 @@ const prisma = require('../config/prisma');
 const subscriptionService = require('./subscriptionService');
 const invoiceService = require('./invoiceService');
 const emailService = require('./emailService');
+const paymentService = require('./paymentService');
 
 const GRACE_PERIOD_DAYS = parseInt(process.env.GRACE_PERIOD_DAYS) || 7;
 
@@ -78,9 +79,13 @@ const getExpiredSubscriptions = async () => {
 
 const processAutoRenewal = async () => {
   const results = {
+    total: 0,
     renewed: 0,
     failed: 0,
     invoicesCreated: 0,
+    invoicesPaid: 0,
+    emailsSent: 0,
+    failures: [],
   };
 
   try {
@@ -109,35 +114,108 @@ const processAutoRenewal = async () => {
       },
     });
 
-    console.log(`找到 ${subscriptionsToRenew.length} 个需要自动续费的订阅`);
+    results.total = subscriptionsToRenew.length;
+    console.log(`[AutoRenew] 找到 ${subscriptionsToRenew.length} 个需要自动续费的订阅`);
 
     for (const subscription of subscriptionsToRenew) {
+      const subscriptionId = subscription.id;
+      const user = subscription.user;
+
       try {
-        const renewedSubscription = await subscriptionService.renewSubscription(subscription.id);
+        console.log(`[AutoRenew] 处理订阅 ${subscriptionId}，用户: ${user.email}`);
 
         const invoice = await invoiceService.generateSubscriptionInvoice(
-          renewedSubscription,
-          invoiceService.BILLING_REASONS.SUBSCRIPTION_CYCLE
+          subscription,
+          invoiceService.BILLING_REASONS.SUBSCRIPTION_CYCLE,
+          { autoGeneratePdf: true, paid: false }
         );
+        results.invoicesCreated++;
+        console.log(`[AutoRenew] 已生成续费账单: ${invoice.invoiceNumber}, 金额: $${invoice.amount}`);
 
-        await emailService.sendInvoicePaid(
-          subscription.user,
+        const paymentResult = await paymentService.processSubscriptionRenewalPayment(
+          subscription,
           invoice
         );
 
-        results.renewed++;
-        results.invoicesCreated++;
+        if (paymentResult.success) {
+          console.log(`[AutoRenew] 订阅 ${subscriptionId} 支付成功: ${paymentResult.payment.stripePaymentId}`);
 
-        console.log(`订阅 ${subscription.id} 自动续费成功`);
+          const renewedSubscription = await subscriptionService.renewSubscription(subscriptionId);
+          console.log(`[AutoRenew] 订阅 ${subscriptionId} 周期已更新，新截止日: ${renewedSubscription.currentPeriodEnd.toISOString().split('T')[0]}`);
+
+          await prisma.invoice.update({
+            where: { id: invoice.id },
+            data: {
+              status: invoiceService.INVOICE_STATUSES.PAID,
+              paidAt: new Date(),
+            },
+          });
+          results.invoicesPaid++;
+
+          await emailService.sendInvoicePaid(user, invoice);
+          results.emailsSent++;
+          console.log(`[AutoRenew] 已向 ${user.email} 发送支付成功通知`);
+
+          results.renewed++;
+        } else {
+          console.warn(`[AutoRenew] 订阅 ${subscriptionId} 支付失败: ${paymentResult.failureReason}`);
+
+          const now = new Date();
+          const gracePeriodEnd = new Date(subscription.currentPeriodEnd);
+          gracePeriodEnd.setDate(gracePeriodEnd.getDate() + GRACE_PERIOD_DAYS);
+
+          if (subscription.status !== SUBSCRIPTION_STATUSES.PAST_DUE) {
+            await prisma.subscription.update({
+              where: { id: subscriptionId },
+              data: {
+                status: SUBSCRIPTION_STATUSES.PAST_DUE,
+                gracePeriodEndsAt: gracePeriodEnd,
+              },
+            });
+            console.log(`[AutoRenew] 订阅 ${subscriptionId} 已进入宽限期，截止: ${gracePeriodEnd.toISOString().split('T')[0]}`);
+
+            try {
+              await emailService.sendGracePeriodStart(user, {
+                ...subscription,
+                gracePeriodEndsAt: gracePeriodEnd,
+              });
+              console.log(`[AutoRenew] 已向 ${user.email} 发送宽限期通知`);
+            } catch (emailErr) {
+              console.error(`[AutoRenew] 发送宽限期通知失败:`, emailErr.message);
+            }
+          }
+
+          results.failed++;
+          results.failures.push({
+            subscriptionId,
+            userEmail: user.email,
+            reason: paymentResult.failureReason,
+            invoiceId: invoice.id,
+            paymentId: paymentResult.payment?.id,
+          });
+        }
       } catch (error) {
+        console.error(`[AutoRenew] 订阅 ${subscriptionId} 处理异常:`, error.message);
         results.failed++;
-        console.error(`订阅 ${subscription.id} 自动续费失败:`, error.message);
+        results.failures.push({
+          subscriptionId,
+          userEmail: user.email,
+          reason: `系统异常: ${error.message}`,
+        });
       }
     }
 
+    console.log(`[AutoRenew] ===== 自动续费执行总结 =====`);
+    console.log(`[AutoRenew] 总订阅数: ${results.total}`);
+    console.log(`[AutoRenew] 续费成功: ${results.renewed}`);
+    console.log(`[AutoRenew] 续费失败: ${results.failed}`);
+    console.log(`[AutoRenew] 生成账单: ${results.invoicesCreated}`);
+    console.log(`[AutoRenew] 已支付账单: ${results.invoicesPaid}`);
+    console.log(`[AutoRenew] 发送成功邮件: ${results.emailsSent}`);
+
     return results;
   } catch (error) {
-    console.error('处理自动续费时发生错误:', error.message);
+    console.error('[AutoRenew] 处理自动续费时发生错误:', error.message);
     throw error;
   }
 };

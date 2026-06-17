@@ -60,6 +60,8 @@ const generateInvoice = async (userId, subscriptionId, amount, billingReason, op
     description = null,
     periodStart = null,
     periodEnd = null,
+    autoGeneratePdf = false,
+    paid = false,
   } = options;
 
   const user = await prisma.user.findUnique({ where: { id: userId } });
@@ -80,9 +82,10 @@ const generateInvoice = async (userId, subscriptionId, amount, billingReason, op
     tax: parseFloat(tax),
     discount: parseFloat(discount),
     couponId,
-    status,
+    status: paid ? INVOICE_STATUSES.PAID : status,
     billingReason,
     dueDate: dueDate ? new Date(dueDate) : null,
+    paidAt: paid ? new Date() : null,
   };
 
   let invoiceItems = [];
@@ -106,7 +109,7 @@ const generateInvoice = async (userId, subscriptionId, amount, billingReason, op
     });
   }
 
-  const invoice = await prisma.invoice.create({
+  let invoice = await prisma.invoice.create({
     data: {
       ...invoiceData,
       items: {
@@ -115,6 +118,13 @@ const generateInvoice = async (userId, subscriptionId, amount, billingReason, op
     },
     include: {
       items: true,
+      user: {
+        select: {
+          id: true,
+          email: true,
+          name: true,
+        },
+      },
       subscription: {
         include: {
           plan: true,
@@ -123,10 +133,34 @@ const generateInvoice = async (userId, subscriptionId, amount, billingReason, op
     },
   });
 
+  if (autoGeneratePdf) {
+    try {
+      const { generateInvoicePdf: generatePdf } = require('./pdfService');
+      const invoicesDir = require('path').join(process.cwd(), 'invoices');
+      if (!require('fs').existsSync(invoicesDir)) {
+        require('fs').mkdirSync(invoicesDir, { recursive: true });
+      }
+      const pdfPath = await generatePdf(invoice, invoice.items, invoice.user);
+      invoice = await prisma.invoice.update({
+        where: { id: invoice.id },
+        data: { pdfUrl: pdfPath },
+        include: {
+          items: true,
+          user: { select: { id: true, email: true, name: true } },
+          subscription: { include: { plan: true } },
+        },
+      });
+    } catch (pdfError) {
+      console.error(`[InvoiceService] 自动生成PDF失败 ${invoice.invoiceNumber}:`, pdfError.message);
+    }
+  }
+
   return invoice;
 };
 
-const generateSubscriptionInvoice = async (subscription, billingReason = BILLING_REASONS.SUBSCRIPTION_CYCLE) => {
+const generateSubscriptionInvoice = async (subscription, billingReason = BILLING_REASONS.SUBSCRIPTION_CYCLE, options = {}) => {
+  const { autoGeneratePdf = false, paid = false } = options;
+
   if (!subscription) {
     const error = new Error('订阅不存在');
     error.status = 404;
@@ -176,7 +210,9 @@ const generateSubscriptionInvoice = async (subscription, billingReason = BILLING
       description,
       periodStart: subscription.currentPeriodStart,
       periodEnd: subscription.currentPeriodEnd,
-      status: INVOICE_STATUSES.PENDING,
+      status: paid ? INVOICE_STATUSES.PAID : INVOICE_STATUSES.PENDING,
+      paid,
+      autoGeneratePdf,
     }
   );
 

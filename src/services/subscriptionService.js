@@ -37,50 +37,19 @@ const calculatePrice = (plan, billingCycle) => {
   return billingCycle === BILLING_CYCLES.MONTHLY ? plan.priceMonthly : plan.priceYearly;
 };
 
-const validateCouponForPlan = async (couponCode, planId) => {
+const validateCouponForPlan = async (couponCode, planId, userId = null) => {
   if (!couponCode) {
     return null;
   }
 
-  const coupon = await prisma.coupon.findUnique({
-    where: { code: couponCode },
-    include: { plans: true },
-  });
+  const couponService = require('./couponService');
 
-  if (!coupon || !coupon.isActive) {
-    const error = new Error('优惠码无效或已停用');
-    error.status = 400;
+  try {
+    const coupon = await couponService.validateCoupon(couponCode, planId, userId);
+    return coupon;
+  } catch (error) {
     throw error;
   }
-
-  const now = new Date();
-  if (coupon.validFrom > now) {
-    const error = new Error('优惠码尚未生效');
-    error.status = 400;
-    throw error;
-  }
-  if (coupon.validTo && coupon.validTo < now) {
-    const error = new Error('优惠码已过期');
-    error.status = 400;
-    throw error;
-  }
-
-  if (coupon.maxUses !== null && coupon.usedCount >= coupon.maxUses) {
-    const error = new Error('优惠码使用次数已达上限');
-    error.status = 400;
-    throw error;
-  }
-
-  if (coupon.appliesTo === 'specific_plans') {
-    const planMatch = coupon.plans.some((cp) => cp.planId === planId);
-    if (!planMatch) {
-      const error = new Error('该优惠码不适用于此订阅计划');
-      error.status = 400;
-      throw error;
-    }
-  }
-
-  return coupon;
 };
 
 const applyCouponDiscount = (price, coupon) => {
@@ -133,52 +102,84 @@ const createSubscription = async (userId, planId, billingCycle, couponCode = nul
     throw error;
   }
 
-  const coupon = await validateCouponForPlan(couponCode, planId);
+  const coupon = await validateCouponForPlan(couponCode, planId, userId);
 
   const basePrice = calculatePrice(plan, billingCycle);
   const currentPrice = applyCouponDiscount(basePrice, coupon);
+  const discountAmount = parseFloat(basePrice) - parseFloat(currentPrice);
 
   const now = new Date();
   const currentPeriodEnd = calculatePeriodEnd(now, billingCycle);
   const gracePeriodEndsAt = calculateGracePeriodEnd(currentPeriodEnd);
 
-  const subscription = await prisma.subscription.create({
-    data: {
-      userId,
-      planId,
-      status: SUBSCRIPTION_STATUSES.ACTIVE,
-      billingCycle,
-      currentPrice,
-      startDate: now,
-      currentPeriodStart: now,
-      currentPeriodEnd,
-      gracePeriodEndsAt,
-      autoRenew: true,
-      couponId: coupon ? coupon.id : null,
-    },
-    include: {
-      plan: true,
-      coupon: true,
-    },
-  });
-
-  if (coupon) {
-    await prisma.coupon.update({
-      where: { id: coupon.id },
-      data: { usedCount: { increment: 1 } },
-    });
-
-    await prisma.couponUsage.create({
+  const result = await prisma.$transaction(async (tx) => {
+    const subscription = await tx.subscription.create({
       data: {
-        couponId: coupon.id,
         userId,
-        subscriptionId: subscription.id,
-        discountAmount: parseFloat(basePrice) - parseFloat(currentPrice),
+        planId,
+        status: SUBSCRIPTION_STATUSES.ACTIVE,
+        billingCycle,
+        currentPrice,
+        startDate: now,
+        currentPeriodStart: now,
+        currentPeriodEnd,
+        gracePeriodEndsAt,
+        autoRenew: true,
+        couponId: coupon ? coupon.id : null,
+      },
+      include: {
+        plan: true,
+        coupon: true,
       },
     });
+
+    if (coupon) {
+      await tx.coupon.update({
+        where: { id: coupon.id },
+        data: { usedCount: { increment: 1 } },
+      });
+
+      await tx.couponUsage.create({
+        data: {
+          couponId: coupon.id,
+          userId,
+          subscriptionId: subscription.id,
+          discountAmount,
+        },
+      });
+    }
+
+    return subscription;
+  });
+
+  let invoice = null;
+  try {
+    const invoiceService = require('./invoiceService');
+    const invoiceData = {
+      subtotal: parseFloat(basePrice),
+      tax: 0,
+      discount: discountAmount,
+      couponId: coupon ? coupon.id : null,
+      description: `${result.plan.name} - New Subscription`,
+      periodStart: result.currentPeriodStart,
+      periodEnd: result.currentPeriodEnd,
+      autoGeneratePdf: true,
+    };
+    invoice = await invoiceService.generateInvoice(
+      userId,
+      result.id,
+      parseFloat(currentPrice),
+      invoiceService.BILLING_REASONS.SUBSCRIPTION_CREATE,
+      invoiceData
+    );
+  } catch (invoiceError) {
+    console.error(`[SubscriptionService] 创建订阅 ${result.id} 的账单失败:`, invoiceError.message);
   }
 
-  return subscription;
+  return {
+    ...result,
+    invoice,
+  };
 };
 
 const cancelSubscription = async (subscriptionId, userId) => {
