@@ -1,0 +1,297 @@
+// Prisma schema for SaaS Subscription Billing System
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// 用户模型
+model User {
+  id            String    @id @default(uuid())
+  email         String    @unique
+  name          String?
+  passwordHash  String
+  role          String    @default("user") // user, admin
+  isActive      Boolean   @default(true)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  subscriptions Subscription[]
+  couponsUsed   CouponUsage[]
+  refunds       Refund[]
+  invoices      Invoice[]
+
+  @@map("users")
+}
+
+// 订阅计划
+model Plan {
+  id          String   @id @default(uuid())
+  name        String
+  description String?
+  priceMonthly Decimal  @db.Decimal(10, 2)
+  priceYearly  Decimal  @db.Decimal(10, 2)
+  billingCycle String   // monthly, yearly
+  features    Json?
+  status      String   @default("active") // active, inactive, archived
+  sortOrder   Int      @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  subscriptions Subscription[]
+  couponPlans   CouponPlan[]
+
+  @@map("plans")
+}
+
+// 订阅
+model Subscription {
+  id              String   @id @default(uuid())
+  userId          String
+  planId          String
+  status          String   // active, paused, cancelled, expired, past_due, pending_upgrade
+  billingCycle    String   // monthly, yearly
+  currentPrice    Decimal  @db.Decimal(10, 2)
+  startDate       DateTime
+  currentPeriodStart DateTime
+  currentPeriodEnd   DateTime
+  endsAt          DateTime?
+  cancelAtPeriodEnd Boolean @default(false)
+  trialEndsAt     DateTime?
+  gracePeriodEndsAt DateTime?
+  autoRenew       Boolean  @default(true)
+  nextPlanId      String?  // 降级时使用，存储下一周期的计划
+  couponId        String?
+  stripeSubscriptionId String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  user     User     @relation(fields: [userId], references: [id])
+  plan     Plan     @relation(fields: [planId], references: [id])
+  nextPlan Plan?    @relation("NextPlan", fields: [nextPlanId], references: [id])
+  coupon   Coupon?  @relation(fields: [couponId], references: [id])
+  invoices Invoice[]
+  payments Payment[]
+  upgradeHistory SubscriptionUpgrade[]
+  downgradeHistory SubscriptionDowngrade[]
+
+  @@map("subscriptions")
+}
+
+// 订阅升级历史
+model SubscriptionUpgrade {
+  id              String   @id @default(uuid())
+  subscriptionId  String
+  fromPlanId      String
+  toPlanId        String
+  fromPrice       Decimal  @db.Decimal(10, 2)
+  toPrice         Decimal  @db.Decimal(10, 2)
+  proratedAmount  Decimal  @db.Decimal(10, 2)
+  remainingDays   Int
+  effectiveDate   DateTime
+  createdAt       DateTime @default(now())
+
+  subscription Subscription @relation(fields: [subscriptionId], references: [id])
+  fromPlan     Plan         @relation("UpgradeFrom", fields: [fromPlanId], references: [id])
+  toPlan       Plan         @relation("UpgradeTo", fields: [toPlanId], references: [id])
+
+  @@map("subscription_upgrades")
+}
+
+// 订阅降级历史
+model SubscriptionDowngrade {
+  id              String   @id @default(uuid())
+  subscriptionId  String
+  fromPlanId      String
+  toPlanId        String
+  scheduledDate   DateTime
+  effectiveDate   DateTime?
+  status          String   // scheduled, applied, cancelled
+  createdAt       DateTime @default(now())
+
+  subscription Subscription @relation(fields: [subscriptionId], references: [id])
+  fromPlan     Plan         @relation("DowngradeFrom", fields: [fromPlanId], references: [id])
+  toPlan       Plan         @relation("DowngradeTo", fields: [toPlanId], references: [id])
+
+  @@map("subscription_downgrades")
+}
+
+// 账单
+model Invoice {
+  id              String   @id @default(uuid())
+  userId          String
+  subscriptionId  String?
+  invoiceNumber   String   @unique
+  amount          Decimal  @db.Decimal(10, 2)
+  subtotal        Decimal  @db.Decimal(10, 2)
+  tax             Decimal  @db.Decimal(10, 2) @default(0)
+  discount        Decimal  @db.Decimal(10, 2) @default(0)
+  couponId        String?
+  status          String   // draft, pending, paid, void, uncollectible
+  billingReason   String   // subscription_create, subscription_cycle, subscription_update, manual
+  dueDate         DateTime?
+  paidAt          DateTime?
+  pdfUrl          String?
+  stripeInvoiceId String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  user         User          @relation(fields: [userId], references: [id])
+  subscription Subscription? @relation(fields: [subscriptionId], references: [id])
+  coupon       Coupon?       @relation(fields: [couponId], references: [id])
+  items        InvoiceItem[]
+  payments     Payment[]
+
+  @@map("invoices")
+}
+
+// 账单项目
+model InvoiceItem {
+  id          String   @id @default(uuid())
+  invoiceId   String
+  description String
+  quantity    Int      @default(1)
+  unitAmount  Decimal  @db.Decimal(10, 2)
+  amount      Decimal  @db.Decimal(10, 2)
+  periodStart DateTime?
+  periodEnd   DateTime?
+  createdAt   DateTime @default(now())
+
+  invoice Invoice @relation(fields: [invoiceId], references: [id])
+
+  @@map("invoice_items")
+}
+
+// 支付记录
+model Payment {
+  id              String   @id @default(uuid())
+  userId          String
+  subscriptionId  String?
+  invoiceId       String?
+  amount          Decimal  @db.Decimal(10, 2)
+  currency        String   @default("usd")
+  status          String   // succeeded, failed, pending, refunded
+  paymentMethod   String   // card, bank_transfer, etc.
+  stripePaymentId String?
+  failureReason   String?
+  paidAt          DateTime?
+  createdAt       DateTime @default(now())
+
+  user         User          @relation(fields: [userId], references: [id])
+  subscription Subscription? @relation(fields: [subscriptionId], references: [id])
+  invoice      Invoice?      @relation(fields: [invoiceId], references: [id])
+  refunds      Refund[]
+
+  @@map("payments")
+}
+
+// 优惠码
+model Coupon {
+  id           String   @id @default(uuid())
+  code         String   @unique
+  type         String   // percentage, fixed
+  value        Decimal  @db.Decimal(10, 2) // 折扣百分比或固定减免金额
+  currency     String?  // fixed类型需要
+  maxUses      Int?     // 最大使用次数
+  usedCount    Int      @default(0)
+  validFrom    DateTime
+  validTo      DateTime?
+  isActive     Boolean  @default(true)
+  description  String?
+  appliesTo    String   // all, specific_plans
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  subscriptions Subscription[]
+  usages        CouponUsage[]
+  invoices      Invoice[]
+  plans         CouponPlan[]
+
+  @@map("coupons")
+}
+
+// 优惠码适用计划
+model CouponPlan {
+  couponId String
+  planId   String
+
+  coupon Coupon @relation(fields: [couponId], references: [id])
+  plan   Plan   @relation(fields: [planId], references: [id])
+
+  @@id([couponId, planId])
+  @@map("coupon_plans")
+}
+
+// 优惠码使用记录
+model CouponUsage {
+  id             String   @id @default(uuid())
+  couponId       String
+  userId         String
+  subscriptionId String?
+  invoiceId      String?
+  discountAmount Decimal  @db.Decimal(10, 2)
+  usedAt         DateTime @default(now())
+
+  coupon       Coupon       @relation(fields: [couponId], references: [id])
+  user         User         @relation(fields: [userId], references: [id])
+  subscription Subscription? @relation(fields: [subscriptionId], references: [id])
+  invoice      Invoice?      @relation(fields: [invoiceId], references: [id])
+
+  @@map("coupon_usages")
+}
+
+// 退款申请
+model Refund {
+  id              String   @id @default(uuid())
+  userId          String
+  paymentId       String
+  invoiceId       String?
+  subscriptionId  String?
+  amount          Decimal  @db.Decimal(10, 2)
+  reason          String
+  status          String   // pending, approved, rejected, refunded, failed
+  adminNote       String?
+  refundedAt      DateTime?
+  stripeRefundId  String?
+  failureReason   String?
+  requestedBy     String?  // user, admin
+  reviewedBy      String?
+  reviewedAt      DateTime?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  user     User     @relation(fields: [userId], references: [id])
+  payment  Payment  @relation(fields: [paymentId], references: [id])
+  invoice  Invoice? @relation(fields: [invoiceId], references: [id])
+  subscription Subscription? @relation(fields: [subscriptionId], references: [id])
+
+  @@map("refunds")
+}
+
+// 邮件通知记录
+model EmailNotification {
+  id          String   @id @default(uuid())
+  userId      String
+  type        String   // renewal_reminder_7d, renewal_reminder_3d, renewal_reminder_1d, grace_period_start, subscription_paused, ...
+  subject     String
+  sentAt      DateTime @default(now())
+  status      String   // sent, failed
+  failureReason String?
+
+  @@map("email_notifications")
+}
+
+// 系统配置
+model SystemConfig {
+  id           String  @id @default(uuid())
+  key          String  @unique
+  value        String?
+  description  String?
+  updatedAt    DateTime @updatedAt
+
+  @@map("system_configs")
+}
